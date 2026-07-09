@@ -276,6 +276,48 @@ def _clear_tool_defs_cache() -> None:
     _tool_defs_cache.clear()
 
 
+def _ensure_mcp_toolsets_registered(enabled_toolsets: Optional[List[str]]) -> None:
+    """Register configured MCP tools before filtering by their toolset aliases.
+
+    Platform config includes raw MCP server names such as
+    ``google_workspace_saratoga``. Those aliases only become valid after MCP
+    discovery registers the canonical ``mcp-<server>`` toolset and alias.
+    Without this pre-snapshot discovery, get_tool_definitions() treats the
+    server names as unknown and can cache a core-tools-only result.
+    """
+    if enabled_toolsets is None:
+        return
+
+    requested = {str(name) for name in enabled_toolsets if name}
+    if not requested:
+        return
+
+    try:
+        from hermes_cli.config import load_config
+
+        mcp_servers = (load_config() or {}).get("mcp_servers") or {}
+        configured = {
+            str(name)
+            for name, server_cfg in mcp_servers.items()
+            if isinstance(server_cfg, dict)
+            and str(server_cfg.get("enabled", True)).strip().lower()
+            not in {"0", "false", "no", "off"}
+        }
+    except Exception:
+        logger.debug("Could not inspect configured MCP server names", exc_info=True)
+        configured = set()
+
+    if not configured or not (requested & configured):
+        return
+
+    try:
+        from tools.mcp_tool import discover_mcp_tools
+
+        discover_mcp_tools()
+    except Exception:
+        logger.debug("MCP discovery before tool snapshot failed", exc_info=True)
+
+
 def get_tool_definitions(
     enabled_toolsets: Optional[List[str]] = None,
     disabled_toolsets: Optional[List[str]] = None,
@@ -300,6 +342,8 @@ def get_tool_definitions(
     Returns:
         Filtered list of OpenAI-format tool definitions.
     """
+    _ensure_mcp_toolsets_registered(enabled_toolsets)
+
     # Fast path: memoized result when the caller doesn't need stdout prints.
     # The cache key captures every argument-level input; the registry
     # generation captures registry mutations (MCP refresh, plugin load).

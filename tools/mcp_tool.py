@@ -2822,6 +2822,18 @@ class MCPServerTask:
                     )
                     return
 
+                if _is_terminal_auth_error(exc) or _is_auth_error(exc):
+                    logger.warning(
+                        "MCP server '%s' hit a terminal OAuth authentication "
+                        "failure after connecting; not reconnecting "
+                        "automatically: %s",
+                        self.name, exc,
+                    )
+                    self._error = exc
+                    _bump_server_error(self.name)
+                    self._ready.set()
+                    return
+
                 self._reconnect_retries += 1
                 if self._reconnect_retries > _MAX_RECONNECT_RETRIES:
                     logger.warning(
@@ -3192,6 +3204,46 @@ def _is_auth_error(exc: BaseException) -> bool:
     return True
 
 
+_TERMINAL_AUTH_ERROR_MARKERS: tuple[str, ...] = (
+    "invalid_grant",
+    "oauth re-authentication required",
+    "browser auth is disabled",
+    "non-interactive environment and no cached tokens",
+    "no cached tokens found",
+    "run `hermes mcp login",
+    "run 'hermes mcp login",
+)
+
+
+def _is_terminal_auth_error(exc: BaseException) -> bool:
+    """Return True when retrying OAuth would only repeat a stale-grant failure."""
+    if not _is_auth_error(exc):
+        return False
+    try:
+        from tools.mcp_oauth import OAuthNonInteractiveError
+        if isinstance(exc, OAuthNonInteractiveError):
+            return True
+    except ImportError:
+        pass
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _TERMINAL_AUTH_ERROR_MARKERS)
+
+
+def _reauth_required_result(server_name: str) -> str:
+    """Build the structured terminal reauth response returned to the model."""
+    return json.dumps({
+        "error": (
+            f"MCP server '{server_name}' requires re-authentication. "
+            f"Run `hermes mcp login {server_name}` interactively. Do NOT retry "
+            f"this tool in the current turn — ask the user/operator to "
+            f"re-authenticate the server first."
+        ),
+        "needs_reauth": True,
+        "terminal": True,
+        "server": server_name,
+    }, ensure_ascii=False)
+
+
 def _handle_auth_error_and_retry(
     server_name: str,
     exc: BaseException,
@@ -3228,6 +3280,10 @@ def _handle_auth_error_and_retry(
     """
     if not _is_auth_error(exc):
         return None
+
+    if _is_terminal_auth_error(exc):
+        _bump_server_error(server_name)
+        return _reauth_required_result(server_name)
 
     from tools.mcp_oauth_manager import get_manager
     manager = get_manager()
@@ -3286,16 +3342,7 @@ def _handle_auth_error_and_retry(
     # needs_reauth error. Bumps the circuit breaker so the model stops
     # retrying the tool.
     _bump_server_error(server_name)
-    return json.dumps({
-        "error": (
-            f"MCP server '{server_name}' requires re-authentication. "
-            f"Run `hermes mcp login {server_name}` (or delete the tokens "
-            f"file under ~/.hermes/mcp-tokens/ and restart). Do NOT retry "
-            f"this tool — ask the user to re-authenticate."
-        ),
-        "needs_reauth": True,
-        "server": server_name,
-    }, ensure_ascii=False)
+    return _reauth_required_result(server_name)
 
 
 # Substrings (lower-cased match) that indicate the MCP server rejected
@@ -3800,6 +3847,296 @@ async def _connect_server(name: str, config: dict) -> MCPServerTask:
     return server
 
 
+_MOSAIC_CLICKUP_GUARDED_TOOLS = {
+    "clickup_filter_tasks",
+    "clickup_search",
+}
+_MOSAIC_CLICKUP_SCOPE_KEYS = {
+    "space_id",
+    "space_ids",
+    "space_name",
+    "space_names",
+    "folder_id",
+    "folder_ids",
+    "folder_name",
+    "folder_names",
+    "list_id",
+    "list_ids",
+    "list_name",
+    "list_names",
+}
+_MOSAIC_CLICKUP_TERMS = (
+    "mosaic",
+    "saratoga",
+    "billy",
+    "vijay",
+    "cta resources",
+    "cta-resources",
+)
+
+
+def _current_profile_id() -> str:
+    """Return the active profile id inferred from HERMES_HOME."""
+    try:
+        from hermes_constants import get_hermes_home
+
+        home = str(get_hermes_home())
+    except Exception:
+        home = os.environ.get("HERMES_HOME", "")
+    return os.path.basename(home.rstrip(os.sep))
+
+
+def _has_nonempty_scope_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set)):
+        return any(_has_nonempty_scope_value(item) for item in value)
+    if isinstance(value, dict):
+        return any(_has_nonempty_scope_value(item) for item in value.values())
+    return True
+
+
+def _iter_tool_policy_candidate_maps(args: dict):
+    """Yield common locations where MCP filter tools carry scope fields."""
+    if not isinstance(args, dict):
+        return
+
+    yield args
+
+    filters = args.get("filters")
+    if isinstance(filters, dict):
+        yield filters
+        location = filters.get("location")
+        if isinstance(location, dict):
+            yield location
+
+    location = args.get("location")
+    if isinstance(location, dict):
+        yield location
+
+
+def _collect_string_values(value: Any) -> List[str]:
+    """Collect string leaves from a nested tool-argument object."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        strings: List[str] = []
+        for item in value.values():
+            strings.extend(_collect_string_values(item))
+        return strings
+    if isinstance(value, (list, tuple, set)):
+        strings = []
+        for item in value:
+            strings.extend(_collect_string_values(item))
+        return strings
+    return []
+
+
+def _policy_disabled(policy: dict) -> bool:
+    enabled = policy.get("enabled", True)
+    if isinstance(enabled, str):
+        return enabled.strip().lower() in {"0", "false", "no", "off"}
+    return enabled is False
+
+
+def _default_tool_policy(server_name: str, tool_name: str) -> Optional[dict]:
+    """Return built-in safety policies for legacy profiles without config."""
+    if (
+        _current_profile_id() == "lead-mosaic-cta"
+        and server_name == "clickup"
+        and tool_name in _MOSAIC_CLICKUP_GUARDED_TOOLS
+    ):
+        return {
+            "scope_label": "Mosaic/Saratoga/Billy/Vijay/CTA Resources",
+            "require_any": {
+                "location_keys": sorted(_MOSAIC_CLICKUP_SCOPE_KEYS),
+                "terms": list(_MOSAIC_CLICKUP_TERMS),
+            },
+            "hint_tool": "clickup_get_workspace_hierarchy",
+        }
+    return None
+
+
+def _configured_tool_policy(
+    server_name: str,
+    tool_name: str,
+    server_config: Optional[dict],
+) -> Optional[dict]:
+    """Return a per-tool policy from mcp_servers.<server>.tool_policies."""
+    if not isinstance(server_config, dict):
+        return None
+    policies = server_config.get("tool_policies") or {}
+    if not isinstance(policies, dict):
+        return None
+    candidates = (
+        tool_name,
+        f"mcp_{server_name}_{tool_name}",
+        f"{server_name}.{tool_name}",
+    )
+    for candidate in candidates:
+        policy = policies.get(candidate)
+        if isinstance(policy, dict) and not _policy_disabled(policy):
+            return policy
+    return None
+
+
+def _tool_policy_for(
+    server_name: str,
+    tool_name: str,
+    server_config: Optional[dict],
+) -> Optional[dict]:
+    return (
+        _configured_tool_policy(server_name, tool_name, server_config)
+        or _default_tool_policy(server_name, tool_name)
+    )
+
+
+def _args_satisfy_tool_policy(args: dict, policy: dict) -> bool:
+    """Return True when tool args satisfy at least one configured scope rule."""
+    if not isinstance(args, dict):
+        return False
+
+    require_any = policy.get("require_any") or policy
+    if not isinstance(require_any, dict):
+        return True
+
+    location_keys = (
+        require_any.get("location_keys")
+        or require_any.get("scope_keys")
+        or require_any.get("keys")
+        or []
+    )
+    if isinstance(location_keys, str):
+        location_keys = [location_keys]
+
+    for item in _iter_tool_policy_candidate_maps(args):
+        for key in location_keys:
+            if isinstance(key, str) and _has_nonempty_scope_value(item.get(key)):
+                return True
+
+    terms = require_any.get("terms") or []
+    if isinstance(terms, str):
+        terms = [terms]
+    if terms:
+        haystack = " ".join(_collect_string_values(args)).lower()
+        if any(isinstance(term, str) and term.lower() in haystack for term in terms):
+            return True
+
+    return not location_keys and not terms
+
+
+def _tool_policy_error(
+    server_name: str,
+    tool_name: str,
+    policy: dict,
+) -> str:
+    scope_label = policy.get("scope_label") or "the configured project scope"
+    hint_tool = policy.get("hint_tool") or ""
+    hint = (
+        f" If you do not know the IDs, call {hint_tool} and retry with a "
+        "scoped location filter."
+        if hint_tool
+        else ""
+    )
+    return json.dumps({
+        "error": (
+            f"Scope guard: profile '{_current_profile_id()}' cannot run broad "
+            f"{server_name}.{tool_name} calls. First scope the call to "
+            f"{scope_label} with an explicit location id/name or a scope "
+            f"keyword.{hint} Do not answer from unscoped workspace results."
+        ),
+        "scope_guard": True,
+        "terminal": True,
+        "server": server_name,
+        "tool": tool_name,
+        "scope_label": scope_label,
+    }, ensure_ascii=False)
+
+
+def _coerce_positive_int(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _mcp_result_max_chars(server_config: Optional[dict]) -> Optional[int]:
+    """Return configured max serialized result size for an MCP server."""
+    if not isinstance(server_config, dict):
+        return None
+    return (
+        _coerce_positive_int(server_config.get("max_result_chars"))
+        or _coerce_positive_int(server_config.get("max_result_bytes"))
+        or _coerce_positive_int((server_config.get("tools") or {}).get("max_result_chars"))
+        or _coerce_positive_int((server_config.get("tools") or {}).get("max_result_bytes"))
+    )
+
+
+def _serialize_tool_success_payload(
+    payload: dict,
+    server_name: str,
+    tool_name: str,
+    server_config: Optional[dict],
+) -> str:
+    """Serialize a successful MCP result, truncating oversized payloads."""
+    text = json.dumps(payload, ensure_ascii=False)
+    cap = _mcp_result_max_chars(server_config)
+    if not cap or len(text) <= cap:
+        return text
+
+    notice = (
+        f"MCP result from {server_name}.{tool_name} was truncated at {cap} chars; "
+        "retry with narrower filters, pagination, or a more specific query."
+    )
+    original_chars = len(text)
+    result = payload.get("result")
+
+    if isinstance(result, str):
+        reserved = len(json.dumps({
+            "result": "",
+            "truncated": True,
+            "original_chars": original_chars,
+            "notice": notice,
+        }, ensure_ascii=False)) + 64
+        preview_len = max(0, cap - reserved)
+        capped = dict(payload)
+        capped["result"] = result[:preview_len]
+        capped["truncated"] = True
+        capped["original_chars"] = original_chars
+        capped["notice"] = notice
+        capped_text = json.dumps(capped, ensure_ascii=False)
+        if len(capped_text) <= cap:
+            return capped_text
+
+    base = {
+        "result_preview": "",
+        "truncated": True,
+        "original_chars": original_chars,
+        "notice": notice,
+    }
+    empty_text = json.dumps(base, ensure_ascii=False)
+    preview_len = max(0, cap - len(empty_text) - 1)
+    base["result_preview"] = text[:preview_len]
+    capped_text = json.dumps(base, ensure_ascii=False)
+    if len(capped_text) <= cap:
+        return capped_text
+
+    minimal = {
+        "truncated": True,
+        "original_chars": original_chars,
+        "notice": "MCP result truncated; retry with narrower filters.",
+    }
+    minimal_text = json.dumps(minimal, ensure_ascii=False)
+    if len(minimal_text) <= cap:
+        return minimal_text
+    return json.dumps({"truncated": True}, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # Handler / check-fn factories
 # ---------------------------------------------------------------------------
@@ -3856,7 +4193,12 @@ def _mark_server_call_started(server: Any) -> None:
         mark_tool_call()
 
 
-def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
+def _make_tool_handler(
+    server_name: str,
+    tool_name: str,
+    tool_timeout: float,
+    server_config: Optional[dict] = None,
+):
     """Return a sync handler that calls an MCP tool via the background loop.
 
     The handler conforms to the registry's dispatch interface:
@@ -3864,6 +4206,10 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """
 
     def _handler(args: dict, **kwargs) -> str:
+        policy = _tool_policy_for(server_name, tool_name, server_config)
+        if policy and not _args_satisfy_tool_policy(args, policy):
+            return _tool_policy_error(server_name, tool_name, policy)
+
         # Circuit breaker: if this server has failed too many times
         # consecutively, short-circuit with a clear message so the model
         # stops retrying and uses alternative approaches (#10447).
@@ -3983,12 +4329,27 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             structured = getattr(result, "structuredContent", None)
             if structured is not None:
                 if text_result:
-                    return json.dumps({
-                        "result": text_result,
-                        "structuredContent": structured,
-                    }, ensure_ascii=False)
-                return json.dumps({"result": structured}, ensure_ascii=False)
-            return json.dumps({"result": text_result}, ensure_ascii=False)
+                    return _serialize_tool_success_payload(
+                        {
+                            "result": text_result,
+                            "structuredContent": structured,
+                        },
+                        server_name,
+                        tool_name,
+                        server_config,
+                    )
+                return _serialize_tool_success_payload(
+                    {"result": structured},
+                    server_name,
+                    tool_name,
+                    server_config,
+                )
+            return _serialize_tool_success_payload(
+                {"result": text_result},
+                server_name,
+                tool_name,
+                server_config,
+            )
 
         def _call_once():
             return _run_on_mcp_loop(_call, timeout=tool_timeout)
@@ -4791,7 +5152,7 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
             name=tool_name_prefixed,
             toolset=toolset_name,
             schema=schema,
-            handler=_make_tool_handler(name, mcp_tool.name, server.tool_timeout),
+            handler=_make_tool_handler(name, mcp_tool.name, server.tool_timeout, config),
             check_fn=_make_check_fn(name),
             is_async=False,
             description=schema["description"],
