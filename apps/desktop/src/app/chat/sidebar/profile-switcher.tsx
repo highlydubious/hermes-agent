@@ -175,9 +175,55 @@ export function ProfileRail() {
   }
 
   // Re-pull the running profile + list on mount so a profile created elsewhere
-  // shows up; cheap and best-effort.
+  // shows up. The desktop backend can finish booting after the rail mounts; keep
+  // retrying briefly so the rail does not stay in its single-profile fallback.
   useEffect(() => {
-    void refreshActiveProfile()
+    let cancelled = false
+    let attempts = 0
+    let retryTimer: number | undefined
+
+    function loadedProfileCount(): number {
+      const current = $profiles.get()
+
+      return Array.isArray(current) ? current.length : 0
+    }
+
+    function clearRetry(): void {
+      if (retryTimer != null) {
+        window.clearTimeout(retryTimer)
+        retryTimer = undefined
+      }
+    }
+
+    function scheduleRetry(): void {
+      if (cancelled || loadedProfileCount() > 1 || attempts >= 8) {
+        return
+      }
+
+      const delay = Math.min(250 * 2 ** attempts, 2000)
+      retryTimer = window.setTimeout(() => void refreshProfiles(), delay)
+    }
+
+    async function refreshProfiles(): Promise<void> {
+      attempts += 1
+      await refreshActiveProfile()
+      scheduleRetry()
+    }
+
+    function refreshOnFocus(): void {
+      attempts = 0
+      clearRetry()
+      void refreshProfiles()
+    }
+
+    void refreshProfiles()
+    window.addEventListener('focus', refreshOnFocus)
+
+    return () => {
+      cancelled = true
+      clearRetry()
+      window.removeEventListener('focus', refreshOnFocus)
+    }
   }, [])
 
   // Open the create dialog when the `profile.create` hotkey fires (the dialog
