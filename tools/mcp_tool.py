@@ -2822,6 +2822,18 @@ class MCPServerTask:
                     )
                     return
 
+                if _is_terminal_auth_error(exc) or _is_auth_error(exc):
+                    logger.warning(
+                        "MCP server '%s' hit a terminal OAuth authentication "
+                        "failure after connecting; not reconnecting "
+                        "automatically: %s",
+                        self.name, exc,
+                    )
+                    self._error = exc
+                    _bump_server_error(self.name)
+                    self._ready.set()
+                    return
+
                 self._reconnect_retries += 1
                 if self._reconnect_retries > _MAX_RECONNECT_RETRIES:
                     logger.warning(
@@ -3192,6 +3204,46 @@ def _is_auth_error(exc: BaseException) -> bool:
     return True
 
 
+_TERMINAL_AUTH_ERROR_MARKERS: tuple[str, ...] = (
+    "invalid_grant",
+    "oauth re-authentication required",
+    "browser auth is disabled",
+    "non-interactive environment and no cached tokens",
+    "no cached tokens found",
+    "run `hermes mcp login",
+    "run 'hermes mcp login",
+)
+
+
+def _is_terminal_auth_error(exc: BaseException) -> bool:
+    """Return True when retrying OAuth would only repeat a stale-grant failure."""
+    if not _is_auth_error(exc):
+        return False
+    try:
+        from tools.mcp_oauth import OAuthNonInteractiveError
+        if isinstance(exc, OAuthNonInteractiveError):
+            return True
+    except ImportError:
+        pass
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _TERMINAL_AUTH_ERROR_MARKERS)
+
+
+def _reauth_required_result(server_name: str) -> str:
+    """Build the structured terminal reauth response returned to the model."""
+    return json.dumps({
+        "error": (
+            f"MCP server '{server_name}' requires re-authentication. "
+            f"Run `hermes mcp login {server_name}` interactively. Do NOT retry "
+            f"this tool in the current turn — ask the user/operator to "
+            f"re-authenticate the server first."
+        ),
+        "needs_reauth": True,
+        "terminal": True,
+        "server": server_name,
+    }, ensure_ascii=False)
+
+
 def _handle_auth_error_and_retry(
     server_name: str,
     exc: BaseException,
@@ -3228,6 +3280,10 @@ def _handle_auth_error_and_retry(
     """
     if not _is_auth_error(exc):
         return None
+
+    if _is_terminal_auth_error(exc):
+        _bump_server_error(server_name)
+        return _reauth_required_result(server_name)
 
     from tools.mcp_oauth_manager import get_manager
     manager = get_manager()
@@ -3286,16 +3342,7 @@ def _handle_auth_error_and_retry(
     # needs_reauth error. Bumps the circuit breaker so the model stops
     # retrying the tool.
     _bump_server_error(server_name)
-    return json.dumps({
-        "error": (
-            f"MCP server '{server_name}' requires re-authentication. "
-            f"Run `hermes mcp login {server_name}` (or delete the tokens "
-            f"file under ~/.hermes/mcp-tokens/ and restart). Do NOT retry "
-            f"this tool — ask the user to re-authenticate."
-        ),
-        "needs_reauth": True,
-        "server": server_name,
-    }, ensure_ascii=False)
+    return _reauth_required_result(server_name)
 
 
 # Substrings (lower-cased match) that indicate the MCP server rejected
