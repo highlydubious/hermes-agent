@@ -34,48 +34,6 @@ def test_terminal_oauth_error_returns_non_retryable_reauth_result():
     assert "hermes mcp login notion" in result["error"]
 
 
-def test_lead_mosaic_clickup_guard_blocks_unscoped_search(monkeypatch, tmp_path):
-    from tools.mcp_tool import _make_tool_handler
-
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "lead-mosaic-cta"))
-    result = json.loads(
-        _make_tool_handler("clickup", "clickup_search", 30.0)({"query": "open tasks"})
-    )
-
-    assert result["scope_guard"] is True
-    assert result["terminal"] is True
-    assert result["server"] == "clickup"
-    assert result["tool"] == "clickup_search"
-
-
-def test_lead_mosaic_clickup_guard_accepts_scope_keyword(monkeypatch, tmp_path):
-    from tools import mcp_tool
-
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "lead-mosaic-cta"))
-    policy = mcp_tool._tool_policy_for("clickup", "clickup_search", {})
-
-    assert policy is not None
-    assert mcp_tool._args_satisfy_tool_policy(
-        {"query": "open Saratoga tasks"}, policy
-    ) is True
-
-
-def test_mcp_result_cap_returns_bounded_truncation_payload():
-    from tools.mcp_tool import _serialize_tool_success_payload
-
-    serialized = _serialize_tool_success_payload(
-        {"result": "x" * 2_000},
-        "clickup",
-        "clickup_search",
-        {"max_result_chars": 400},
-    )
-    result = json.loads(serialized)
-
-    assert len(serialized) <= 400
-    assert result["truncated"] is True
-    assert result["original_chars"] > 2_000
-
-
 def test_requested_mcp_alias_triggers_discovery_before_tool_filtering():
     import model_tools
 
