@@ -9255,9 +9255,17 @@ def cmd_update(args):
     from hermes_cli.config import (
         detect_install_method,
         format_docker_update_message,
+        get_external_update_command,
         is_managed,
         managed_error,
     )
+
+    external_update_command = get_external_update_command()
+    if external_update_command:
+        print("✗ Built-in Hermes updates are disabled for this patched checkout.")
+        print("  Use the operator-managed stable-release workflow instead:")
+        print(f"  {external_update_command}")
+        sys.exit(1)
 
     if is_managed():
         managed_error("update Hermes Agent")

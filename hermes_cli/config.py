@@ -523,8 +523,32 @@ def recommended_update_command_for_method(method: str) -> str:
     return "hermes update"
 
 
+_EXTERNAL_UPDATE_COMMAND_FILE = ".external_update_command"
+
+
+def get_external_update_command() -> Optional[str]:
+    """Return the operator-managed update command, when configured.
+
+    A source checkout with a carried patch stack must not let the built-in
+    updater silently switch it to ``main``.  Operators can place one command
+    line in ``$HERMES_HOME/.external_update_command`` to make both CLI and
+    dashboard update surfaces defer to their guarded workflow instead.
+    """
+    try:
+        path = get_hermes_home() / _EXTERNAL_UPDATE_COMMAND_FILE
+        if not path.is_file():
+            return None
+        command = path.read_text(encoding="utf-8").splitlines()[0].strip()
+        return command[:512] or None
+    except (OSError, IndexError):
+        return None
+
+
 def recommended_update_command() -> str:
     """Return the best update command for the current installation."""
+    external_cmd = get_external_update_command()
+    if external_cmd:
+        return external_cmd
     managed_cmd = get_managed_update_command()
     if managed_cmd:
         return managed_cmd

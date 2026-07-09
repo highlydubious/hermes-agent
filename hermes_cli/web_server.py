@@ -59,6 +59,7 @@ from hermes_cli.config import (
     clear_model_endpoint_credentials,
     get_config_path,
     get_env_path,
+    get_external_update_command,
     get_hermes_home,
     load_config,
     load_env,
@@ -3306,6 +3307,22 @@ async def gateway_drain(request: Request):
 @app.post("/api/hermes/update")
 async def update_hermes():
     """Kick off ``hermes update`` in the background."""
+    external_update_command = get_external_update_command()
+    if external_update_command:
+        message = (
+            "Built-in Hermes updates are disabled for this patched checkout. "
+            "Use the operator-managed stable-release workflow instead."
+        )
+        _record_completed_action("hermes-update", message, exit_code=1)
+        return {
+            "ok": False,
+            "pid": None,
+            "name": "hermes-update",
+            "error": "external_update_policy",
+            "message": message,
+            "update_command": external_update_command,
+        }
+
     if _dashboard_local_update_managed_externally():
         message = (
             "Hermes updates are managed outside this dashboard in "
@@ -3421,6 +3438,21 @@ async def check_hermes_update(force: bool = False):
                  desktop's remote update overlay renders this as "what's
                  changed". Additive: existing consumers ignore it.
     """
+    external_update_command = get_external_update_command()
+    if external_update_command:
+        return {
+            "install_method": "operator-managed",
+            "current_version": __version__,
+            "behind": None,
+            "update_available": False,
+            "can_apply": False,
+            "update_command": external_update_command,
+            "message": (
+                "This patched checkout follows an operator-managed stable-release "
+                "workflow instead of the built-in updater."
+            ),
+        }
+
     if _dashboard_local_update_managed_externally():
         return {
             "install_method": "managed-runtime",
