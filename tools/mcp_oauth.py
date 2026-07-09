@@ -143,8 +143,17 @@ def _is_interactive() -> bool:
         return False
 
 
+def _oauth_browser_auth_disabled() -> bool:
+    """Return True when background OAuth must fail closed instead of opening UI."""
+    return os.environ.get("HERMES_MCP_OAUTH_NO_BROWSER") == "1" or (
+        os.environ.get("HERMES_GATEWAY_NO_BROWSER_AUTH") == "1"
+    )
+
+
 def _can_open_browser() -> bool:
     """Return True if opening a browser is likely to work."""
+    if _oauth_browser_auth_disabled():
+        return False
     # Explicit SSH session → no local display
     if os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY"):
         return False
@@ -410,6 +419,14 @@ async def _redirect_handler(authorization_url: str) -> None:
     )
     print(msg, file=sys.stderr)
 
+    if _oauth_browser_auth_disabled():
+        print(
+            "  Browser OAuth is disabled for this Hermes background process. "
+            "Run `hermes mcp login <server>` interactively to reconnect.\n",
+            file=sys.stderr,
+        )
+        return
+
     # On a remote SSH session the OAuth provider redirects to
     # http://127.0.0.1:<port>/callback, which reaches the callback server on
     # the *remote* machine — not the user's local machine where the browser
@@ -472,6 +489,13 @@ async def _wait_for_callback() -> tuple[str, str | None]:
         raise RuntimeError(
             "OAuth callback port not set — build_oauth_auth must be called "
             "before _wait_for_oauth_callback"
+        )
+
+    if _oauth_browser_auth_disabled():
+        raise OAuthNonInteractiveError(
+            "OAuth re-authentication required; browser auth is disabled for "
+            "this Hermes background process. Run `hermes mcp login <server>` "
+            "interactively to reconnect."
         )
 
     # The callback server is already running (started in build_oauth_auth).

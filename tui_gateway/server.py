@@ -1110,7 +1110,7 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
         reset_transport(token)
 
 
-def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
+def _wait_agent(session: dict, rid: str, timeout: float = 180.0) -> dict | None:
     ready = session.get("agent_ready")
     if ready is not None and not ready.wait(timeout=timeout):
         return _err(rid, 5032, "agent initialization timed out")
@@ -1175,6 +1175,22 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 except Exception:
                     session_db = None
             try:
+                # Unified Desktop can switch Chat into another profile without
+                # restarting the dashboard process. MCP discovery normally runs
+                # at process startup, so discover again while the selected
+                # profile's HERMES_HOME override is active before the agent
+                # snapshots its tools.
+                try:
+                    from tools.mcp_tool import discover_mcp_tools
+
+                    discover_mcp_tools()
+                except Exception as exc:
+                    logger.warning(
+                        "Profile-scoped MCP discovery failed for TUI session %s: %s",
+                        key,
+                        exc,
+                    )
+
                 # Lazy-resumed (watch) sessions carry the stored conversation
                 # id — pass it through so the upgrade continues that session
                 # instead of starting a fresh one under the same key.

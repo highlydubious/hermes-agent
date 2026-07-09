@@ -3551,6 +3551,10 @@ def generate_launchd_plist() -> str:
         <string>{venv_dir}</string>
         <key>HERMES_HOME</key>
         <string>{hermes_home}</string>
+        <key>HERMES_MCP_OAUTH_NO_BROWSER</key>
+        <string>1</string>
+        <key>HERMES_GATEWAY_NO_BROWSER_AUTH</key>
+        <string>1</string>
     </dict>
 
     <key>LimitLoadToSessionType</key>
