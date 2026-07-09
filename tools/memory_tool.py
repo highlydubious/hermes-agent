@@ -332,12 +332,14 @@ class MemoryStore:
                 current = self._char_count(target)
                 return {
                     "success": False,
+                    "terminal": True,
                     "error": (
                         f"Memory at {current:,}/{limit:,} chars. "
                         f"Adding this entry ({len(content)} chars) would exceed the limit. "
-                        f"Consolidate now: use 'replace' to merge overlapping entries into "
-                        f"shorter ones or 'remove' stale or less important entries (see "
-                        f"current_entries below), then retry this add — all in this turn."
+                        "Do not retry another single memory add or replace this turn. "
+                        "Use one operations batch that removes or shortens enough stale "
+                        "entries and adds the new entry, or answer the user that memory "
+                        "is full and needs an explicit cleanup step."
                     ),
                     "current_entries": entries,
                     "usage": f"{current:,}/{limit:,}",
@@ -398,11 +400,13 @@ class MemoryStore:
                 current = self._char_count(target)
                 return {
                     "success": False,
+                    "terminal": True,
                     "error": (
                         f"Replacement would put memory at {new_total:,}/{limit:,} chars. "
-                        f"Shorten the new content, or 'remove' other stale or less important "
-                        f"entries to make room (see current_entries below), then retry — all "
-                        f"in this turn."
+                        "Do not retry another single memory add or replace this turn. "
+                        "Use one operations batch that removes or shortens enough stale "
+                        "entries and applies the replacement, or answer the user that memory "
+                        "is full and needs an explicit cleanup step."
                     ),
                     "current_entries": entries,
                     "usage": f"{current:,}/{limit:,}",
@@ -542,10 +546,12 @@ class MemoryStore:
                 current = self._char_count(target)
                 return {
                     "success": False,
+                    "terminal": True,
                     "error": (
                         f"After applying all {len(operations)} operations, memory would be at "
                         f"{new_total:,}/{limit:,} chars -- over the limit. Remove or shorten more "
-                        f"entries in the same batch (see current_entries below), then retry."
+                        f"entries in one revised batch (see current_entries below), then retry. "
+                        "Do not retry this exact batch."
                     ),
                     "current_entries": self._entries_for(target),
                     "usage": f"{current:,}/{limit:,}",
@@ -1087,7 +1093,5 @@ registry.register(
     check_fn=check_memory_requirements,
     emoji="🧠",
 )
-
-
 
 
