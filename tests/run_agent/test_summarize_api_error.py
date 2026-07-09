@@ -12,6 +12,8 @@ provider error. This is a diagnostic improvement and is platform-agnostic.
 
 from types import SimpleNamespace
 
+import httpx
+
 from run_agent import AIAgent
 
 
@@ -54,3 +56,19 @@ def test_empty_body_fallback_redacts_secrets(monkeypatch):
     summary = AIAgent._summarize_api_error(err)
     assert "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdef" not in summary
 
+
+def test_unread_streaming_response_preserves_original_error_message():
+    """A closed/unread streaming body must not mask the provider exception."""
+    response = httpx.Response(
+        404,
+        stream=httpx.ByteStream(b'{"error":{"message":"retired model"}}'),
+    )
+    err = Exception("Gemini HTTP 404: model is no longer available")
+    err.status_code = 404
+    err.body = {}
+    err.response = response
+
+    summary = AIAgent._summarize_api_error(err)
+
+    assert "model is no longer available" in summary
+    assert "ResponseNotRead" not in summary

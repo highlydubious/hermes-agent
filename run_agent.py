@@ -2143,7 +2143,14 @@ class AIAgent:
         # widens exposure vs the old empty-body "HTTP 400" string).
         response = getattr(error, "response", None)
         if response is not None:
-            snippet = (getattr(response, "text", None) or "").strip()
+            try:
+                snippet = (getattr(response, "text", None) or "").strip()
+            except Exception:
+                # httpx raises ResponseNotRead when this is a non-OK streaming
+                # response whose body was already consumed by the provider
+                # adapter's bounded error reader.  Error summarization must
+                # never mask the original, actionable provider exception.
+                snippet = ""
             if snippet:
                 status_code = getattr(error, "status_code", None)
                 prefix = f"HTTP {status_code}: " if status_code else ""
