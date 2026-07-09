@@ -21,6 +21,21 @@ def test_external_update_command_reads_profile_marker(monkeypatch, tmp_path):
     )
 
 
+def test_external_update_command_inherits_shared_root_marker(monkeypatch, tmp_path):
+    root = tmp_path / "hermes-root"
+    profile = root / "profiles" / "augustus"
+    profile.mkdir(parents=True)
+    (root / ".external_update_command").write_text(
+        "hermes-stable-upgrade status\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+
+    from hermes_cli.config import get_external_update_command
+
+    assert get_external_update_command() == "hermes-stable-upgrade status"
+
+
 def test_cmd_update_defers_to_external_workflow(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / ".external_update_command").write_text(

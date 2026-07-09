@@ -534,14 +534,24 @@ def get_external_update_command() -> Optional[str]:
     line in ``$HERMES_HOME/.external_update_command`` to make both CLI and
     dashboard update surfaces defer to their guarded workflow instead.
     """
-    try:
-        path = get_hermes_home() / _EXTERNAL_UPDATE_COMMAND_FILE
-        if not path.is_file():
-            return None
-        command = path.read_text(encoding="utf-8").splitlines()[0].strip()
-        return command[:512] or None
-    except (OSError, IndexError):
-        return None
+    from hermes_constants import get_default_hermes_root
+
+    homes = [get_hermes_home(), get_default_hermes_root()]
+    seen: set[Path] = set()
+    for home in homes:
+        path = home / _EXTERNAL_UPDATE_COMMAND_FILE
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            if not path.is_file():
+                continue
+            command = path.read_text(encoding="utf-8").splitlines()[0].strip()
+            if command:
+                return command[:512]
+        except (OSError, IndexError):
+            continue
+    return None
 
 
 def recommended_update_command() -> str:
