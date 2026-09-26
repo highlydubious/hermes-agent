@@ -3,7 +3,7 @@ import argparse
 import asyncio
 import pytest
 from hermes_cli import external_update_policy as policy
-from hermes_cli import config, main, update_contract
+from hermes_cli import banner, config, main, update_contract
 from hermes_cli.web_routers import actions
 
 
@@ -15,6 +15,8 @@ def test_profile_policy_inherits_root_and_can_override(tmp_path, monkeypatch):
     (tmp_path / '.external_update_command').write_text('hermes-stable-upgrade prepare latest\n')
     assert config.recommended_update_command() == 'hermes-stable-upgrade prepare latest'
     assert update_contract.evaluate_update_admission(tmp_path).code == 'external-policy'
+    monkeypatch.setattr(banner, '_resolve_repo_dir', lambda: pytest.fail('unstable main check ran'))
+    assert banner.check_for_updates() is None
     (profile / '.external_update_command').write_text('profile-upgrade\n')
     assert policy.external_update_command() == 'profile-upgrade'
     (profile / '.external_update_command').write_text('\n')

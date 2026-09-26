@@ -383,6 +383,12 @@ def check_for_updates(*, passive: bool = False) -> Optional[int]:
     If ``HERMES_REVISION`` is set (nix builds embed it), compare it to upstream main; otherwise
     compare the local checkout's HEAD. Both go through the GitHub API, never ``git fetch``.
     """
+    from hermes_cli.external_update_policy import external_update_command
+
+    # Stable, patched installs are checked by their operator workflow, not upstream main.
+    if external_update_command():
+        return None
+
     def _read_config_opt_out():
         from hermes_cli.config import load_config
         return load_config().get("updates", {}).get("check", True) is False
