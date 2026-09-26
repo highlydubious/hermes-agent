@@ -328,7 +328,9 @@ def recommended_update_command() -> str:
     """Return the best update command for the current installation.
     Managed state wins over the code-scoped stamp: a managed install can carry a stale stamp
     naming an update path the managed guard refuses."""
-    return get_managed_update_command() or recommended_update_command_for_method(
+    from hermes_cli.external_update_policy import external_update_command
+
+    return external_update_command() or get_managed_update_command() or recommended_update_command_for_method(
         detect_install_method(get_project_root()))
 
 

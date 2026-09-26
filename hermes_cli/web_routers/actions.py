@@ -59,7 +59,7 @@ _MANAGED_EXTERNALLY_MESSAGE = "Hermes updates are managed outside this dashboard
 _UPDATE_REFUSAL_ERROR_CODES = {
     "docker": "docker_update_unsupported", "image-marker": "docker_update_unsupported",
     "image-marker-invalid": "docker_update_unsupported", "apt": "apt_update_required",
-    "nix": "nix_update_unsupported",
+    "nix": "nix_update_unsupported", "external-policy": "external_update_policy",
 }
 
 
@@ -271,6 +271,17 @@ async def check_hermes_update(force: bool = False, profile: Optional[str] = None
             "install_method": "managed-runtime", "current_version": __version__, "behind": None,
             "update_available": False, "can_apply": False,
             "update_command": "managed outside dashboard", "message": _MANAGED_EXTERNALLY_MESSAGE,
+        }
+
+    from hermes_cli.external_update_policy import external_update_command
+
+    with _config_profile_scope(profile):
+        command = external_update_command()
+    if command:
+        return {
+            "install_method": "operator-managed", "current_version": __version__, "behind": None,
+            "update_available": False, "can_apply": False,
+            "update_command": command, "message": "Local patches require the guarded stable-upgrade workflow.",
         }
 
     install_method = detect_install_method(_server_path("PROJECT_ROOT"))
